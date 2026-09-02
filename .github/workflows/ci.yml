@@ -1,0 +1,43 @@
+name: Payment Service CI
+
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+
+jobs:
+
+
+  build:
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      - name: Checkour source code
+        uses: actions/checkout@v4
+
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+         distribution: temurin
+         java-version: '17'
+         cache: maven
+
+
+      - name: Build application
+        run: mvn clean package
+
+
+
+
+
