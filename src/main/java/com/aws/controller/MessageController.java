@@ -9,6 +9,6 @@ public class MessageController {
 
     @GetMapping("/getPaymentMessage")
     public String message() {
-         return "Payment Service is running";
+         return "Payment Service is running - Version 2";
     }
 }
