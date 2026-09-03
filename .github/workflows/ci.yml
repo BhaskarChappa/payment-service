@@ -15,13 +15,20 @@ env:
 
 jobs:
   build-and-push:
+    name: Build and Push Docker Image to ECR
     runs-on: ubuntu-latest
 
     steps:
 
+      # --------------------------------------------------
+      # 1. Checkout source code
+      # --------------------------------------------------
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # 2. Setup Java 17
+      # --------------------------------------------------
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -29,45 +36,134 @@ jobs:
           java-version: '17'
           cache: maven
 
+      # --------------------------------------------------
+      # 3. Build Spring Boot application
+      # --------------------------------------------------
       - name: Build application
         run: |
           mvn clean package -DskipTests
 
-      - name: Show GitHub OIDC information
+      # --------------------------------------------------
+      # 4. Display GitHub Actions information
+      # --------------------------------------------------
+      - name: Show GitHub information
         run: |
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Branch: $GITHUB_REF"
-          echo "Event: $GITHUB_EVENT_NAME"
-          echo "Actor: $GITHUB_ACTOR"
-          echo "Environment: $GITHUB_ENV"
+          echo "========================================"
+          echo "GitHub Repository : $GITHUB_REPOSITORY"
+          echo "GitHub Branch     : $GITHUB_REF"
+          echo "GitHub Event      : $GITHUB_EVENT_NAME"
+          echo "GitHub Actor      : $GITHUB_ACTOR"
+          echo "========================================"
 
+      # --------------------------------------------------
+      # 5. Get and inspect OIDC claims
+      # --------------------------------------------------
+      - name: Check GitHub OIDC claims
+        shell: bash
+        run: |
+          echo "Requesting GitHub OIDC token..."
+
+          TOKEN_RESPONSE=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.value')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "ERROR: GitHub OIDC token was not generated."
+            exit 1
+          fi
+
+          PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f2)
+
+          # Add Base64 padding if necessary
+          PADDING=$((4 - ${#PAYLOAD} % 4))
+
+          if [ "$PADDING" -ne 4 ]; then
+            PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PADDING))"
+          fi
+
+          DECODED_PAYLOAD=$(echo "$PAYLOAD" | base64 -d 2>/dev/null)
+
+          echo ""
+          echo "========================================"
+          echo "GitHub OIDC Claims"
+          echo "========================================"
+
+          echo "OIDC subject (sub):"
+          echo "$DECODED_PAYLOAD" | jq -r '.sub'
+
+          echo ""
+          echo "OIDC audience (aud):"
+          echo "$DECODED_PAYLOAD" | jq -r '.aud'
+
+          echo ""
+          echo "Repository:"
+          echo "$DECODED_PAYLOAD" | jq -r '.repository'
+
+          echo ""
+          echo "Repository owner:"
+          echo "$DECODED_PAYLOAD" | jq -r '.repository_owner'
+
+          echo ""
+          echo "Ref:"
+          echo "$DECODED_PAYLOAD" | jq -r '.ref'
+
+          echo ""
+          echo "========================================"
+
+      # --------------------------------------------------
+      # 6. Configure AWS credentials using GitHub OIDC
+      # --------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::891612582525:role/GitHubActionsDeploymentRole
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
+      # --------------------------------------------------
+      # 7. Verify AWS authentication
+      # --------------------------------------------------
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      # --------------------------------------------------
+      # 8. Login to Amazon ECR
+      # --------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # --------------------------------------------------
+      # 9. Build Docker image
+      # --------------------------------------------------
       - name: Build Docker image
         run: |
           docker build \
             -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
             .
 
+      # --------------------------------------------------
+      # 10. Push SHA-tagged image to ECR
+      # --------------------------------------------------
       - name: Push Docker image
         run: |
           docker push \
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
+      # --------------------------------------------------
+      # 11. Tag image as latest
+      # --------------------------------------------------
       - name: Tag latest
         run: |
           docker tag \
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
 
+      # --------------------------------------------------
+      # 12. Push latest image to ECR
+      # --------------------------------------------------
       - name: Push latest
         run: |
           docker push \
