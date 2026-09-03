@@ -50,6 +50,13 @@ jobs:
         run: |
           mvn clean package -DskipTests
 
+      # --------------------------------------------------
+      # . actions-oidc- debug
+      # --------------------------------------------------
+      - name: Debug GitHub OIDC claims
+        uses: github/actions-oidc-debugger@main
+        with:
+         audience: sts.amazonaws.com
 
       # --------------------------------------------------
       # 4. Configure AWS credentials using GitHub OIDC
