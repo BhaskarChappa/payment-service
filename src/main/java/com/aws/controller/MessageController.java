@@ -9,6 +9,6 @@ public class MessageController {
 
     @GetMapping("/getPaymentMessage")
     public String message() {
-         return "Payment Service is running - Version 2";
+         return "Payment Service is running - Version 3 deploy in AWS";
     }
 }
