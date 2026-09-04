@@ -12,10 +12,14 @@ permissions:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: payment-service
+  ECS_CLUSTER: payment-cluster
+  ECS_SERVICE: payment-service
+  ECS_TASK_DEFINITION: payment-service-task
+  CONTAINER_NAME: payment-service
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Image to ECR
+  build-and-deploy:
+    name: Build, Push and Deploy to ECS
     runs-on: ubuntu-latest
 
     steps:
@@ -44,7 +48,7 @@ jobs:
           mvn clean package -DskipTests
 
       # --------------------------------------------------
-      # 4. Display GitHub Actions information
+      # 4. Display GitHub information
       # --------------------------------------------------
       - name: Show GitHub information
         run: |
@@ -53,6 +57,7 @@ jobs:
           echo "GitHub Branch     : $GITHUB_REF"
           echo "GitHub Event      : $GITHUB_EVENT_NAME"
           echo "GitHub Actor      : $GITHUB_ACTOR"
+          echo "Git Commit SHA    : $GITHUB_SHA"
           echo "========================================"
 
       # --------------------------------------------------
@@ -126,6 +131,7 @@ jobs:
       # --------------------------------------------------
       - name: Verify AWS identity
         run: |
+          echo "AWS Identity:"
           aws sts get-caller-identity
 
       # --------------------------------------------------
@@ -136,35 +142,120 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # --------------------------------------------------
-      # 9. Build Docker image
+      # 9. Set ECR image
+      # --------------------------------------------------
+      - name: Set image URI
+        id: image
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA}"
+
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+          echo "========================================"
+          echo "Docker Image:"
+          echo "$IMAGE_URI"
+          echo "========================================"
+
+      # --------------------------------------------------
+      # 10. Build Docker image
       # --------------------------------------------------
       - name: Build Docker image
         run: |
           docker build \
-            -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            -t "$IMAGE_URI" \
             .
 
       # --------------------------------------------------
-      # 10. Push SHA-tagged image to ECR
+      # 11. Push SHA-tagged image to ECR
       # --------------------------------------------------
-      - name: Push Docker image
+      - name: Push Docker image to ECR
         run: |
-          docker push \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push "$IMAGE_URI"
 
       # --------------------------------------------------
-      # 11. Tag image as latest
+      # 12. Download current ECS task definition
       # --------------------------------------------------
-      - name: Tag latest
+      - name: Download current task definition
         run: |
-          docker tag \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_DEFINITION" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+          echo "Current task definition downloaded."
 
       # --------------------------------------------------
-      # 12. Push latest image to ECR
+      # 13. Create new task definition with new image
       # --------------------------------------------------
-      - name: Push latest
+      - name: Render new task definition
         run: |
-          docker push \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          jq \
+            --arg IMAGE "$IMAGE_URI" \
+            --arg CONTAINER "$CONTAINER_NAME" \
+            '
+            .containerDefinitions |=
+              map(
+                if .name == $CONTAINER
+                then .image = $IMAGE
+                else .
+                end
+              )
+            |
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            ' \
+            task-definition.json > new-task-definition.json
+
+          echo "New task definition prepared."
+
+      # --------------------------------------------------
+      # 14. Register new ECS task definition revision
+      # --------------------------------------------------
+      - name: Register new ECS task definition
+        id: register-task
+        run: |
+          NEW_TASK_DEFINITION=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "NEW_TASK_DEFINITION=$NEW_TASK_DEFINITION" >> "$GITHUB_ENV"
+
+          echo "========================================"
+          echo "New Task Definition:"
+          echo "$NEW_TASK_DEFINITION"
+          echo "========================================"
+
+      # --------------------------------------------------
+      # 15. Update ECS service
+      # --------------------------------------------------
+      - name: Deploy to ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TASK_DEFINITION"
+
+          echo "ECS service deployment started."
+
+      # --------------------------------------------------
+      # 16. Wait for ECS service to become stable
+      # --------------------------------------------------
+      - name: Wait for ECS deployment
+        run: |
+          echo "Waiting for ECS service to become stable..."
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+          echo "========================================"
+          echo "ECS deployment completed successfully."
+          echo "========================================"
